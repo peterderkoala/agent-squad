@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Autonomous outer loop. Fresh context each round, state lives in files.
 # Usage: .mysquad/ralph.sh [max_rounds]   (default 10)
+# Stop gracefully: touch .mysquad/stop   (the current round finishes first)
+# A failed round without progress (usage/rate limit, API error) is retried with backoff
+# (5, 10, 20, 40, 60, 60... minutes) and does not count as a round; SQUAD_MAX_FAILS (default 8) in a row end the run.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not a git repo."; exit 1; }
@@ -8,8 +11,10 @@ mkdir -p .mysquad/log
 
 MAX="${1:-10}"
 export PONYTAIL_DEFAULT_MODE=full
-LEAD_MODEL="claude-opus-5-5"
 STALE=0
+FAILS=0
+MAX_FAILS="${SQUAD_MAX_FAILS:-8}"
+STOP=.mysquad/stop
 
 # Human-in-the-loop: notify when the squad needs you.
 # Set SQUAD_NOTIFY_CMD to a command that uses "$1" as the message, for example:
@@ -23,6 +28,8 @@ open_questions() {
 }
 count_lines() { printf '%s' "$1" | grep -c . || true; }
 finish() { notify "$1"; exit "$2"; }
+check_stop() { if [ -e "$STOP" ]; then rm -f "$STOP"; finish "Squad stopped by $STOP. Open questions: $N_OLD." 3; fi; }
+wait_min() { for _ in $(seq 1 "$1"); do check_stop; sleep 60; done; }
 N_OLD="$(count_lines "$(open_questions)")"
 
 # .mysquad/SPEC.md is optional. Without it the goal in .mysquad/PLAN.md is the only input.
@@ -45,33 +52,48 @@ if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
   git checkout -b squad/work
 fi
 
-for i in $(seq 1 "$MAX"); do
-  if tail -n 1 .mysquad/STATUS.md | grep -q "ALL DONE"; then
-    finish "Squad done after $((i-1)) rounds. Open questions: $N_OLD." 0
+i=0
+while [ "$i" -lt "$MAX" ]; do
+  check_stop
+  if tail -n 1 .mysquad/STATUS.md | grep -qE "^[[:space:]]*ALL DONE[[:space:]]*$"; then
+    finish "Squad done after $i rounds. Open questions: $N_OLD." 0
   fi
 
   code-review-graph update --brief || true
   BEFORE="$(git rev-parse HEAD)$(md5sum .mysquad/STATUS.md .mysquad/PLAN.md | md5sum)"
-  echo "=== Round $i/$MAX ($(date +%H:%M)) ==="
+  echo "=== Round $((i+1))/$MAX ($(date +%H:%M)) ==="
 
-  timeout 90m claude -p "You are the squad lead. Follow CLAUDE.md. $SPEC_NOTE Read .mysquad/PLAN.md, .mysquad/STATUS.md, .mysquad/LEARNINGS.md. First process answered open questions (lines with ANSWER:). \
+  timeout 90m claude -p "You are the squad lead. Follow your agent rules. $SPEC_NOTE Read .mysquad/PLAN.md, .mysquad/STATUS.md, .mysquad/LEARNINGS.md. First process answered open questions (lines with ANSWER:). \
 If .mysquad/PLAN.md has no tasks, use the product-owner first. Otherwise take the next batch of open tasks, \
 run them through developer -> tester -> reviewer, merge what passes all gates, and update .mysquad/STATUS.md. \
 Stop after one batch." \
-    --model "$LEAD_MODEL" \
+    --agent lead \
     --permission-mode acceptEdits \
     --max-turns 150 \
-    | tee -a .mysquad/log/squad.log || echo "Round $i failed, continuing."
+    | tee -a .mysquad/log/squad.log
+  RC=$?
 
   OQ="$(open_questions)"; N_NEW="$(count_lines "$OQ")"
   if [ "$N_NEW" -gt "$N_OLD" ]; then
-    notify "Squad round $i: $((N_NEW-N_OLD)) new open question(s), $N_NEW in total. Answer by appending '| ANSWER: ...' in .mysquad/STATUS.md. $(printf '%s' "$OQ" | tail -n $((N_NEW-N_OLD)) | cut -c1-200 | tr '\n' ' ')"
+    notify "Squad round $((i+1)): $((N_NEW-N_OLD)) new open question(s), $N_NEW in total. Answer by appending '| ANSWER: ...' in .mysquad/STATUS.md. $(printf '%s' "$OQ" | tail -n $((N_NEW-N_OLD)) | cut -c1-200 | tr '\n' ' ')"
   fi
   N_OLD="$N_NEW"
   AFTER="$(git rev-parse HEAD)$(md5sum .mysquad/STATUS.md .mysquad/PLAN.md | md5sum)"
-  if [ "$BEFORE" = "$AFTER" ]; then STALE=$((STALE+1)); else STALE=0; fi
-  if [ "$STALE" -ge 2 ]; then
-    finish "Squad stopped: no progress for 2 rounds. Open questions: $N_OLD. See .mysquad/STATUS.md." 2
+
+  if [ "$BEFORE" != "$AFTER" ]; then
+    i=$((i+1)); STALE=0; FAILS=0
+  elif [ "$RC" -ne 0 ]; then
+    # Failed without progress: usually a usage/rate limit. Back off, don't burn a round.
+    FAILS=$((FAILS+1))
+    [ "$FAILS" -ge "$MAX_FAILS" ] && finish "Squad stopped: $FAILS failed rounds in a row (last exit $RC). See .mysquad/log/squad.log." 4
+    WAIT=$((5 * 2 ** (FAILS-1))); [ "$WAIT" -gt 60 ] && WAIT=60
+    echo "Round failed (exit $RC) without progress. Retry $FAILS/$MAX_FAILS in ${WAIT}m."
+    wait_min "$WAIT"
+  else
+    i=$((i+1)); STALE=$((STALE+1)); FAILS=0
+    if [ "$STALE" -ge 2 ]; then
+      finish "Squad stopped: no progress for 2 rounds. Open questions: $N_OLD. See .mysquad/STATUS.md." 2
+    fi
   fi
 done
 

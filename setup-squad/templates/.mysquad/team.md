@@ -1,6 +1,6 @@
 # Team
 
-Lead: the main Claude Code session. Follows `CLAUDE.md`, never writes product code.
+Lead: the main Claude Code session, running as the `lead` agent (`.claude/agents/lead.md`, set as default in `.claude/settings.json`). Orchestrates, never writes product code.
 Every role works under `/ponytail full` and asks the code graph before grepping.
 
 | Role | Agent file | Model | Does | Never does |

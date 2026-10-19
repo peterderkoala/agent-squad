@@ -3,6 +3,8 @@
 
   setup_squad.py --check            report only, write nothing
   setup_squad.py --apply            report, then create/merge the squad files
+  setup_squad.py --upgrade          like --apply, but also overwrite squad-owned files that differ
+                                    (agents, squad skills, ralph.sh); squad state (.mysquad/*.md) is never touched
   --repo PATH                       target repo (default: current directory)
 """
 import argparse, json, os, shutil, stat, subprocess, sys
@@ -12,6 +14,11 @@ HERE = Path(__file__).resolve().parent.parent
 TEMPLATES = HERE / "templates"
 START, END = "<!-- squad:start -->", "<!-- squad:end -->"
 SPECIAL = {"CLAUDE.squad.md", "gitignore.squad"}
+
+
+def is_state(rel):
+    """Squad state the team writes; templates only seed it."""
+    return rel.parts[0] == ".mysquad" and rel.suffix == ".md"
 
 
 def run(cmd, cwd):
@@ -91,7 +98,7 @@ def merge_json(src, dst):
     return dst
 
 
-def apply(repo):
+def apply(repo, upgrade=False):
     log = []
     for t in sorted(TEMPLATES.rglob("*")):
         if not t.is_file():
@@ -116,10 +123,16 @@ def apply(repo):
                 log.append(("created", rel))
             continue
         if dst.exists():
-            log.append(("same" if dst.read_bytes() == t.read_bytes() else "kept (differs)", rel))
-            continue
+            if dst.read_bytes() == t.read_bytes():
+                log.append(("same", rel))
+                continue
+            if not upgrade or is_state(rel):
+                log.append(("kept (differs)", rel))
+                continue
+            log.append(("upgraded", rel))
+        else:
+            log.append(("created", rel))
         shutil.copyfile(t, dst)
-        log.append(("created", rel))
         if rel.name.endswith(".sh"):
             dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -176,14 +189,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--upgrade", action="store_true")
     ap.add_argument("--repo", default=".")
     a = ap.parse_args()
     repo = Path(a.repo).resolve()
     print("== Doctor ==")
     print_rows(doctor(repo))
-    if a.apply and not a.check:
+    if (a.apply or a.upgrade) and not a.check:
         print("\n== Structure ==")
-        for s, rel in apply(repo):
+        for s, rel in apply(repo, a.upgrade):
             print(f"[{s:^15}] {rel}")
         probs = verify(repo)
         print("\n== Verify ==")

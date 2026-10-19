@@ -1,6 +1,6 @@
 # Using the squad
 
-This guide covers a squad from installation to a finished run. The rules the lead follows are in the target repo's `CLAUDE.md` (the block between `<!-- squad:start -->` and `<!-- squad:end -->`). This guide explains them from the human side.
+This guide covers a squad from installation to a finished run. In the target repo the lead's rules are in `.claude/agents/lead.md`, each role's rules in its own agent file, and the rules shared by all roles in the `CLAUDE.md` block between `<!-- squad:start -->` and `<!-- squad:end -->`. This guide explains them from the human side.
 
 ## 1. Prerequisites
 
@@ -23,21 +23,26 @@ The doctor also lists the test, lint and build gates it found (`npm run test/lin
 
 Run `/setup-squad` in the target repo. Claude asks once before installing missing tools, then:
 
-1. Copies the templates. Existing files are kept, `settings.json` and `.mcp.json` are merged, and the squad rules go into a marked block of `CLAUDE.md`. `.mysquad/log/` and `.code-review-graph/` are added to `.gitignore`.
+1. Copies the templates. Existing files are kept, `settings.json` and `.mcp.json` are merged, and the shared squad rules go into a marked block of `CLAUDE.md`. `.mysquad/log/`, `.mysquad/stop` and `.code-review-graph/` are added to `.gitignore`.
 2. Runs `code-review-graph install --platform claude-code` and `code-review-graph build`, then applies once more to restore settings the graph install may have rewritten.
 3. Verifies the result and lists what only you can do (plugin install, git commit).
 
 You can run it again at any time. A second run changes nothing.
+
+### Upgrade
+
+A plain run never overwrites a file that already exists, so template fixes don't reach a repo that already has the squad. Run `/setup-squad upgrade` (script: `--upgrade`) to overwrite the squad-owned files that differ: agents, the squad skills and `ralph.sh`. They are reported as `upgraded`. Your state in `.mysquad/*.md` is never touched. Local edits to an upgraded file are replaced, so review `git diff` and restore what you want to keep.
 
 Commit `.claude/`, `.mcp.json`, `CLAUDE.md` and `.mysquad/` so the squad travels with the repo.
 
 ### What gets installed
 
 ```
-CLAUDE.md                     squad rules block (the lead's rulebook)
+CLAUDE.md                     shared squad rules block (all roles)
 .mcp.json                     code-review-graph MCP server
-.claude/settings.json         permissions (no push, no rm -rf, no curl, no .env reads), ponytail, env
-.claude/agents/*.md           the five roles
+.claude/settings.json         "agent": "lead", permissions (no push, no rm -rf, no curl, no .env reads), ponytail, env
+.claude/agents/lead.md        the lead's rulebook (main thread)
+.claude/agents/*.md           the five delegated roles
 .claude/skills/grill-squad    interview → SPEC
 .claude/skills/plan-squad     raw plan → PLAN format
 .mysquad/                     squad state + ralph.sh
@@ -47,14 +52,18 @@ CLAUDE.md                     squad rules block (the lead's rulebook)
 
 | Role | Model | Does | Never does |
 |---|---|---|---|
-| **lead** (main session) | Opus | picks batches, dispatches, merges, keeps STATUS | writes product code |
+| **lead** (main session, `lead` agent) | Opus | picks batches, dispatches, merges, keeps STATUS | writes product code |
 | product-owner | Opus | goal → small tasks in `PLAN.md`, fills gap markers | touches code |
 | architect | Opus | design note for `needs-design` tasks, resolves blocks | writes production code |
 | developer | Sonnet | one task, test-first at its seams, own worktree, commits | redesigns, edits files outside `files:` |
 | tester | Sonnet | full suite + lint + build, adds missing acceptance tests | fixes production code |
 | reviewer | Opus | read-only diff review, security, `/ponytail-review` | edits files |
 
+`.claude/settings.json` sets `"agent": "lead"`, so every Claude Code session in the target repo starts as the lead. To talk to plain Claude instead, remove that line or start with another agent (`claude --agent <name>`).
+
 To change a role, edit `.claude/agents/<role>.md` in the target repo and update `.mysquad/team.md`.
+
+A developer works in its own git worktree, which only contains committed files. The lead therefore starts every developer prompt with `TEAM_ROOT: <main checkout>`, and the developer reads the task and its corrections from there.
 
 ## 4. Define the work
 
@@ -95,7 +104,7 @@ The fields that matter most:
 .mysquad/ralph.sh 10
 ```
 
-Each round starts a fresh `claude -p` session (lead on Opus, `acceptEdits`, max 150 turns, 90 min timeout) that:
+Each round starts a fresh `claude -p --agent lead` session (`acceptEdits`, max 150 turns, 90 min timeout) that:
 
 1. processes answered open questions,
 2. runs the product-owner if there are no tasks,
@@ -110,10 +119,16 @@ The loop stops when:
 | last line of `STATUS.md` is `ALL DONE` | 0 |
 | max rounds reached | 1 |
 | 2 rounds without progress (no new commit, PLAN/STATUS unchanged) | 2 |
+| `.mysquad/stop` exists (checked before each round and during backoff; the file is removed) | 3 |
+| `SQUAD_MAX_FAILS` (default 8) failed rounds in a row | 4 |
+
+To stop a running loop cleanly, run `touch .mysquad/stop`. The current round finishes first.
+
+A round that fails (non-zero exit, for example a usage or rate limit) without any progress doesn't count as a round and doesn't count toward the no-progress stop. The loop waits 5, 10, 20, 40, then 60 minutes per further failure and retries, which covers a 5-hour usage window with the default of 8.
 
 Logs are written to `.mysquad/log/squad.log` and `.mysquad/log/notify.log`.
 
-A task is **done** when the tests are green, the linter is clean, the build passes, the reviewer says "no blocking issues", the acceptance criteria are met and `STATUS.md` is updated. A task gets at most 4 fix iterations before it is marked `blocked`.
+A task is **done** when the tests are green, the linter is clean, the build passes, the reviewer says "no blocking issues", the acceptance criteria are met and `STATUS.md` is updated. A task gets at most 3 fix iterations before it is marked `blocked`. A finding that comes back after a fix round doesn't get another fix round: the lead routes it to the architect as a `repeat-rejection` block.
 
 ## 6. Your part during a run
 

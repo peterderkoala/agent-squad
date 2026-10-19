@@ -14,7 +14,7 @@ Before writing code, run `/ponytail full` (Skill tool) and follow its ladder: sk
 
 ## Run
 
-1. Read the task in .mysquad/PLAN.md (acceptance, design, seams, files) and .mysquad/decisions.md. State in one line what you build.
+1. Your prompt starts with `TEAM_ROOT: <path>`. Read the task in `<TEAM_ROOT>/.mysquad/PLAN.md` (acceptance, design, seams, files, corrections) and `<TEAM_ROOT>/.mysquad/decisions.md`, never the copies in your worktree: they miss uncommitted plan changes. No `TEAM_ROOT` given: use the first `worktree` path of `git worktree list --porcelain`. State in one line what you build.
 2. **Seams**: the task's `seams:` names the public boundaries to test at. Test only there. A missing or `not given` seam is a block of category `no-seams`.
 3. **Loop**, one vertical slice at a time (tracer bullet): write one failing test at a seam (red), write the minimum code that passes (green), repeat. After every slice run the typecheck and that single test file.
 4. **Tests that last**: they verify behaviour through the public interface and survive refactors. Expected values come from the acceptance criteria or a literal example, never recomputed the way the code computes them. Internal collaborators stay unmocked and private methods untested.
